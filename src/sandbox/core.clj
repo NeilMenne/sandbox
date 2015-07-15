@@ -39,92 +39,47 @@
           ret (do (take 5 (repeatedly out)))]
       (= '(6 7 8 9 10) ret))))
 
-;;; close out with a more interesting example that takes maps
-;;; representing some sort of business object, mutating and filtering
-;;; it as some might do, first process takes from channel c does
-;;; something, and then passes to the final process via channel d
-(def db (atom {}))
-(defn sanitize-id
-  [m]
-  (if (contains? m :id)
-    (update m :id str)
-    m))
-
-(defn dup?
-  [m]
-  (not (get @db (:id m))))
-
-(def channel-c (async/chan 10 (comp (map sanitize-id) (filter dup?))))
-(def channel-d (async/chan 10))
-
-(defn c->d
-  "a simple process that takes from c, mutates the data, and puts into
-  channel d"
-  []
-  (let [ms (map (fn [x] {:id x :as-num x}) (range 0 5))
-        _  (async/onto-chan channel-c ms)]
-    (Thread/sleep 10)
-    (when-let [cs (do (take 5 (repeatedly #(deref (future (async/<!! channel-c)) 10 nil))))]
-      (let [cs (map #(assoc % :new-data (rand)) cs)]
-        (async/onto-chan channel-d cs)
-        (Thread/sleep 10)))))
-
-(defn store-row
-  "store a single row"
-  [some-db r]
-  (assoc some-db (:id r) r))
-
-(defn take-one-from-d
-  []
-  (deref (future (async/<!! channel-d)) 10 nil))
-
-(defn store-in-db
-  "final process: stores results in db atom; re-running
-  transform-and-pipe won't end up taking anything from channel-c
-  because of the filter"
-  []
-  (loop [v (take-one-from-d)]
-    (if v
-      (do
-        (prn v)
-        (swap! db store-row v)
-        (recur (take-one-from-d)))
-      @db)))
-
-; (c->d)
-; (store-in-db)
-
 (def drain-buf (async/sliding-buffer 10))
 (def drain-channel (async/chan drain-buf))
 
-(def other-buf (async/sliding-buffer 100))
-(def other-channel (async/chan other-buf))
+(defn poll!
+  "non-blocking take from the provided channels"
+  [& chans]
+  (first (async/alts!! chans :default nil)))
 
-(defn drain
-  "draining a buffered channel (requires an actual buffer, not a
-  number for the channel configuration)"
-  []
-  (loop [c (count drain-buf)
-         ret []]
-    (if (> c 0)
-     (let [v (async/<!! drain-channel)]
-       (do
-         (recur (dec c)
-                (conj ret v))))
-     ret)))
+(defn drain!
+  "take n (or all things if no n specified) things from a channel"
+  ([chan] (take-while some? (repeatedly #(poll! chan))))
+  ([chan n]
+   (take n (drain! chan))))
 
-(defn do-drain
+(defn drain-example
+  "I have found it useful to sometimes take many things from a channel
+  and get them out of the channel at once, so I wrote drain! to do so"
   []
   (async/onto-chan drain-channel (range 0 50) false)
   (Thread/sleep 10)
-  (drain))
+  (drain! drain-channel))
 
-(defn drain!
-  "drain some channel, c"
-  [c]
-  (loop [ret []
-         v (first (async/alts!! [c] :default :none-avail))]
-    (if (= v :none-avail)
-      ret
-      (recur (conj ret v)
-             (first (async/alts!! [c] :default :none-avail))))))
+;;; subprocess example
+(defn sub-process
+  [f c & [e-chan]]
+  (async/go-loop []
+    (let [v (async/<! c)]
+      (when (and v (not= v :terminate))
+        (try (f v)
+             (catch Exception e
+               (when e-chan
+                 (async/go (async/>! e-chan e)))))
+        (recur)))))
+
+(def proc-chan (async/chan (async/sliding-buffer 100)))
+
+(defn sub-process-example
+  []
+  (sub-process println proc-chan)
+  (async/>!! proc-chan "print me!")
+  (async/<!! (async/timeout 20))
+  (async/>!! proc-chan :terminate))
+
+;;; TODO: mix example, mult example
