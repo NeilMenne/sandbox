@@ -83,3 +83,50 @@
   (async/>!! proc-chan :terminate))
 
 ;;; TODO: mix example, mult example
+(def out (async/chan))
+(def mix (async/mix out))
+(def in1 (async/chan 100))
+(def in2 (async/chan 100))
+
+(defn admix-all []
+  (async/admix mix in1)
+  (async/admix mix in2))
+
+(defn sub-in1
+  []
+  (async/go-loop []
+    (async/<! (async/timeout 300))
+    (async/>! in1 {:which "in1"
+                   :val (rand-int 1000)})
+    (recur)))
+
+(defn sub-in2
+  []
+  (async/go-loop []
+    (async/<! (async/timeout 300))
+    (async/>! in2 {:which "in2"
+                   :val (rand-int 1000)})
+    (recur)))
+
+(defn drain-only-one-from-mix
+  []
+  (let [{:keys [which] :as f} (async/<!! out)
+        chan-name (if (= which "in1")
+                    in1 in2)]
+    (async/toggle mix {chan-name {:solo :pause}})
+    (let [all-in (conj (drain! out) f) ; don't forget to use the first value you took
+          _ (async/toggle mix {chan-name {:solo false}})
+          ret (transduce (comp (map :val)
+                               (filter #(> % 200)))
+                         + all-in)]
+      {which ret})))
+
+(defn drain-one-proc
+  []
+  (admix-all)
+  (sub-in1)
+  (sub-in2)
+  (async/go-loop []
+    (async/<! (async/timeout 3000))
+    (println (drain-only-one-from-mix))
+    (recur)))
