@@ -130,3 +130,59 @@
     (async/<! (async/timeout 3000))
     (println (drain-only-one-from-mix))
     (recur)))
+
+(def pub-chan (async/chan))
+(def pub (async/pub pub-chan :type))
+(defn subscriber-process
+  "provide a type of message you'd like this process to subscribe to"
+  [which-type p f]
+  (let [s (async/chan)
+        _ (async/sub p which-type s)]
+    (async/go-loop []
+      (let [val (async/<! s)]
+        (when val
+          (if (map? val)
+            (f (which-type val))
+            (f val))
+          (recur))))))
+
+(defn sub-two
+  []
+  (subscriber-process :request pub println)
+  (subscriber-process :log pub println)
+  (async/>!! pub-chan {:type :request :request "the criteria was met"})
+  (async/>!! pub-chan {:type :log :log "doesn't really matter; i'm subbed to completely different things"})
+  ;; both subprocesses will get the nil from channel close and
+  ;; terminate
+  (async/close! pub-chan))
+
+;; more complicated example
+(defn topic-fn
+  [val]
+  (cond (number? val)
+        :just-a-number
+
+        :else
+        :other))
+
+(defn buffer-fn
+  "if you know at pub creation time that certain subs will need the
+  buffers (but might not be setup that way themselves) you can provide
+  custom buffer functions"
+  [topic]
+  (case topic
+    :just-a-number nil
+    :other (async/dropping-buffer 5)
+    (async/sliding-buffer 50)))
+
+(def pc (async/chan))
+(def p (async/pub pc topic-fn buffer-fn))
+(defn use-the-custom-pub
+  []
+  (subscriber-process :just-a-number p (let [n (atom 0)]
+                                         (fn [v]
+                                           (swap! n + v)
+                                           (println @n))))
+  (subscriber-process :other p println)
+  (async/onto-chan pc (range 0 100) false)
+  (async/>!! pc :trig-other))
